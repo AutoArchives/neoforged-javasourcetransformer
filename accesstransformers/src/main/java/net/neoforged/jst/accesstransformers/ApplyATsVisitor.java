@@ -64,37 +64,35 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
     @Override
     public void visitElement(@NotNull PsiElement element) {
         if (element instanceof PsiClass psiClass) {
-            if (psiClass.getQualifiedName() != null) {
-                String className = getJVMClassName(psiClass);
+            String className = getJVMClassName(psiClass);
 
-                var classAt = pendingATs.remove(new Target.ClassTarget(className));
-                apply(classAt, psiClass, psiClass);
-                // We also remove any possible inner class ATs declared for that class as all class targets targeting inner classes
-                // generate a InnerClassTarget AT
-                if (psiClass.getParent() instanceof PsiClass parent) {
-                    pendingATs.remove(new Target.InnerClassTarget(getJVMClassName(parent), className));
+            var classAt = pendingATs.remove(new Target.ClassTarget(className));
+            apply(classAt, psiClass, psiClass);
+            // We also remove any possible inner class ATs declared for that class as all class targets targeting inner classes
+            // generate a InnerClassTarget AT
+            if (psiClass.getParent() instanceof PsiClass parent) {
+                pendingATs.remove(new Target.InnerClassTarget(getJVMClassName(parent), className));
+            }
+
+            checkImplicitConstructor(psiClass, className, classAt);
+
+            var fieldWildcard = pendingATs.remove(new Target.WildcardFieldTarget(className));
+            if (fieldWildcard != null) {
+                for (PsiField field : psiClass.getFields()) {
+                    // Apply a merged state if an explicit AT for the field already exists
+                    var newState = merge(fieldWildcard, pendingATs.remove(new Target.FieldTarget(className, field.getName())));
+                    logger.debug("Applying field wildcard AT %s to %s in %s", newState, field.getName(), className);
+                    apply(newState, field, psiClass);
                 }
+            }
 
-                checkImplicitConstructor(psiClass, className, classAt);
-
-                var fieldWildcard = pendingATs.remove(new Target.WildcardFieldTarget(className));
-                if (fieldWildcard != null) {
-                    for (PsiField field : psiClass.getFields()) {
-                        // Apply a merged state if an explicit AT for the field already exists
-                        var newState = merge(fieldWildcard, pendingATs.remove(new Target.FieldTarget(className, field.getName())));
-                        logger.debug("Applying field wildcard AT %s to %s in %s", newState, field.getName(), className);
-                        apply(newState, field, psiClass);
-                    }
-                }
-
-                var methodWildcard = pendingATs.remove(new Target.WildcardMethodTarget(className));
-                if (methodWildcard != null) {
-                    for (PsiMethod method : psiClass.getMethods()) {
-                        // Apply a merged state if an explicit AT for the method already exists
-                        var newState = merge(methodWildcard, pendingATs.remove(method(className, method)));
-                        logger.debug("Applying method wildcard AT %s to %s in %s", newState, method.getName(), className);
-                        apply(newState, method, psiClass);
-                    }
+            var methodWildcard = pendingATs.remove(new Target.WildcardMethodTarget(className));
+            if (methodWildcard != null) {
+                for (PsiMethod method : psiClass.getMethods()) {
+                    // Apply a merged state if an explicit AT for the method already exists
+                    var newState = merge(methodWildcard, pendingATs.remove(method(className, method)));
+                    logger.debug("Applying method wildcard AT %s to %s in %s", newState, method.getName(), className);
+                    apply(newState, method, psiClass);
                 }
             }
         } else if (element instanceof PsiField field) {
