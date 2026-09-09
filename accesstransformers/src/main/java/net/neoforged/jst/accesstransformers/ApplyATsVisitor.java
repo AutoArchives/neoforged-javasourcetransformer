@@ -14,6 +14,9 @@ import com.intellij.psi.PsiRecordComponent;
 import com.intellij.psi.PsiRecursiveElementVisitor;
 import com.intellij.psi.PsiWhiteSpace;
 import com.intellij.psi.util.ClassUtil;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
 import net.neoforged.accesstransformer.parser.AccessTransformerFiles;
 import net.neoforged.accesstransformer.parser.Target;
 import net.neoforged.accesstransformer.parser.Transformation;
@@ -51,6 +54,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
     private final Map<Target, Transformation> pendingATs;
     private final Logger logger;
     private final ProblemReporter problemReporter;
+    private final Set<String> allTargetedClasses = new HashSet<>();;
     boolean errored = false;
 
     public ApplyATsVisitor(AccessTransformerFiles ats, Replacements replacements, Map<Target, Transformation> pendingATs, Logger logger, ProblemReporter problemReporter) {
@@ -59,12 +63,37 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
         this.logger = logger;
         this.pendingATs = pendingATs;
         this.problemReporter = problemReporter;
+
+        // To skip any class that has no access transformer targeting any part of it (incl. inner classes or anonymous classes),
+        // take the set of targeted classes and create a new set that consists of those classes and all of their parent classes
+        // (Example: "example.C$Inner$1" results in "example.C", "example.C$Inner", and "example.C$Inner$1")
+        //
+        // This means we may have to iterate over elements that might not be targeted at all. (In the previous example, that'd
+        // be methods and fields in "example.C" and "example.C$Inner" if the only target is "example.C$Inner$1")
+        // However, that is the price we pay to ensure any targeted class is actually visited, even anonymous ones.
+        Deque<String> queue = new ArrayDeque<>(ats.getTargets());
+        String name;
+        while ((name = queue.poll()) != null) {
+            allTargetedClasses.add(name);
+            int lastIndex = name.lastIndexOf('$');
+            if (lastIndex != -1) {
+                // Strip the last-most '$'-separated element and add the resulting string back to the queue
+                queue.push(name.substring(0, lastIndex));
+            }
+        }
     }
 
     @Override
     public void visitElement(@NotNull PsiElement element) {
         if (element instanceof PsiClass psiClass) {
             String className = getJVMClassName(psiClass);
+            if (!allTargetedClasses.contains(className)) {
+                // Skip this class and its children, but not the inner classes
+                for (PsiClass innerClass : psiClass.getInnerClasses()) {
+                    visitElement(innerClass);
+                }
+                return;
+            }
 
             var classAt = pendingATs.remove(new Target.ClassTarget(className));
             apply(classAt, psiClass, psiClass);
