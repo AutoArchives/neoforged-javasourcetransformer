@@ -65,21 +65,14 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
     public void visitElement(@NotNull PsiElement element) {
         if (element instanceof PsiClass psiClass) {
             if (psiClass.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(psiClass);
-                if (!ats.containsClassTarget(className)) {
-                    // Skip this class and its children, but not the inner classes
-                    for (PsiClass innerClass : psiClass.getInnerClasses()) {
-                        visitElement(innerClass);
-                    }
-                    return;
-                }
+                String className = getJVMClassName(psiClass);
 
                 var classAt = pendingATs.remove(new Target.ClassTarget(className));
                 apply(classAt, psiClass, psiClass);
                 // We also remove any possible inner class ATs declared for that class as all class targets targeting inner classes
                 // generate a InnerClassTarget AT
                 if (psiClass.getParent() instanceof PsiClass parent) {
-                    pendingATs.remove(new Target.InnerClassTarget(ClassUtil.getJVMClassName(parent), className));
+                    pendingATs.remove(new Target.InnerClassTarget(getJVMClassName(parent), className));
                 }
 
                 checkImplicitConstructor(psiClass, className, classAt);
@@ -107,18 +100,31 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
         } else if (element instanceof PsiField field) {
             final var cls = field.getContainingClass();
             if (cls != null && cls.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(cls);
+                String className = getJVMClassName(cls);
                 apply(pendingATs.remove(new Target.FieldTarget(className, field.getName())), field, cls);
             }
         } else if (element instanceof PsiMethod method) {
             final var cls = method.getContainingClass();
-            if (cls != null && cls.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(cls);
-                apply(pendingATs.remove(method(className, method)), method, cls);
+            if (cls != null) {
+                var className = getJVMClassName(cls);
+                if (!className.isEmpty()) {
+                    apply(pendingATs.remove(method(className, method)), method, cls);
+                }
             }
         }
 
         element.acceptChildren(this);
+    }
+
+    // This returns a JVM class name like ClassUtil#getJVMClassName, but accounts for anonymous classes
+    private String getJVMClassName(PsiClass aClass) {
+        // Quick-path
+        final String qName = ClassUtil.getJVMClassName(aClass);
+        if (qName != null) return qName;
+
+        var sb = new StringBuilder();
+        PsiHelper.getBinaryClassName(aClass, sb); // This returns a binary class name with '/'s; convert it to a JVM class name with '.'s
+        return sb.toString().replace('/', '.');
     }
 
     private void apply(@Nullable Transformation at, PsiModifierListOwner owner, PsiClass containingClass) {
@@ -132,7 +138,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
             @Override
             public String toString() {
                 if (owner instanceof PsiClass cls) {
-                    return ClassUtil.getJVMClassName(cls);
+                    return getJVMClassName(cls);
                 }
                 String memberName;
                 if (owner instanceof PsiMethod mtd && mtd.isConstructor()) {
@@ -140,7 +146,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
                 } else {
                     memberName = ((NavigationItem) owner).getName();
                 }
-                return memberName + " of " + ClassUtil.getJVMClassName(containingClass);
+                return memberName + " of " + getJVMClassName(containingClass);
             }
         };
         logger.debug("Applying AT %s to %s", at, targetInfo);
