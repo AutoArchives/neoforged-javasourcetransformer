@@ -14,8 +14,6 @@ import com.intellij.psi.PsiRecordComponent;
 import com.intellij.psi.PsiRecursiveElementVisitor;
 import com.intellij.psi.PsiWhiteSpace;
 import com.intellij.psi.util.ClassUtil;
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.HashSet;
 import net.neoforged.accesstransformer.parser.AccessTransformerFiles;
 import net.neoforged.accesstransformer.parser.Target;
@@ -71,15 +69,13 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
         // This means we may have to iterate over elements that might not be targeted at all. (In the previous example, that'd
         // be methods and fields in "example.C" and "example.C$Inner" if the only target is "example.C$Inner$1")
         // However, that is the price we pay to ensure any targeted class is actually visited, even anonymous ones.
-        Deque<String> queue = new ArrayDeque<>(ats.getTargets());
-        String name;
-        while ((name = queue.poll()) != null) {
-            allTargetedClasses.add(name);
-            int lastIndex = name.lastIndexOf('$');
-            if (lastIndex != -1) {
-                // Strip the last-most '$'-separated element and add the resulting string back to the queue
-                queue.push(name.substring(0, lastIndex));
-            }
+        for (String target : ats.getTargets()) {
+            int lastIndex = target.length();
+            do {
+                target = target.substring(0, lastIndex);
+                allTargetedClasses.add(target);
+                lastIndex = target.lastIndexOf('$');
+            } while (lastIndex != -1);
         }
     }
 
