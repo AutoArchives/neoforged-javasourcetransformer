@@ -14,6 +14,7 @@ import com.intellij.psi.PsiRecordComponent;
 import com.intellij.psi.PsiRecursiveElementVisitor;
 import com.intellij.psi.PsiWhiteSpace;
 import com.intellij.psi.util.ClassUtil;
+import java.util.HashSet;
 import net.neoforged.accesstransformer.parser.AccessTransformerFiles;
 import net.neoforged.accesstransformer.parser.Target;
 import net.neoforged.accesstransformer.parser.Transformation;
@@ -51,6 +52,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
     private final Map<Target, Transformation> pendingATs;
     private final Logger logger;
     private final ProblemReporter problemReporter;
+    private final Set<String> allTargetedClasses = new HashSet<>();;
     boolean errored = false;
 
     public ApplyATsVisitor(AccessTransformerFiles ats, Replacements replacements, Map<Target, Transformation> pendingATs, Logger logger, ProblemReporter problemReporter) {
@@ -59,66 +61,93 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
         this.logger = logger;
         this.pendingATs = pendingATs;
         this.problemReporter = problemReporter;
+
+        // To skip any class that has no access transformer targeting any part of it (incl. inner classes or anonymous classes),
+        // take the set of targeted classes and create a new set that consists of those classes and all of their parent classes
+        // (Example: "example.C$Inner$1" results in "example.C", "example.C$Inner", and "example.C$Inner$1")
+        //
+        // This means we may have to iterate over elements that might not be targeted at all. (In the previous example, that'd
+        // be methods and fields in "example.C" and "example.C$Inner" if the only target is "example.C$Inner$1")
+        // However, that is the price we pay to ensure any targeted class is actually visited, even anonymous ones.
+        for (String target : ats.getTargets()) {
+            int lastIndex = target.length();
+            do {
+                target = target.substring(0, lastIndex);
+                allTargetedClasses.add(target);
+                lastIndex = target.lastIndexOf('$');
+            } while (lastIndex != -1);
+        }
     }
 
     @Override
     public void visitElement(@NotNull PsiElement element) {
         if (element instanceof PsiClass psiClass) {
-            if (psiClass.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(psiClass);
-                if (!ats.containsClassTarget(className)) {
-                    // Skip this class and its children, but not the inner classes
-                    for (PsiClass innerClass : psiClass.getInnerClasses()) {
-                        visitElement(innerClass);
-                    }
-                    return;
+            String className = getJVMClassName(psiClass);
+            if (!allTargetedClasses.contains(className)) {
+                // Skip this class and its children, but not the inner classes
+                for (PsiClass innerClass : psiClass.getInnerClasses()) {
+                    visitElement(innerClass);
                 }
+                return;
+            }
 
-                var classAt = pendingATs.remove(new Target.ClassTarget(className));
-                apply(classAt, psiClass, psiClass);
-                // We also remove any possible inner class ATs declared for that class as all class targets targeting inner classes
-                // generate a InnerClassTarget AT
-                if (psiClass.getParent() instanceof PsiClass parent) {
-                    pendingATs.remove(new Target.InnerClassTarget(ClassUtil.getJVMClassName(parent), className));
+            var classAt = pendingATs.remove(new Target.ClassTarget(className));
+            apply(classAt, psiClass, psiClass);
+            // We also remove any possible inner class ATs declared for that class as all class targets targeting inner classes
+            // generate a InnerClassTarget AT
+            if (psiClass.getParent() instanceof PsiClass parent) {
+                pendingATs.remove(new Target.InnerClassTarget(getJVMClassName(parent), className));
+            }
+
+            checkImplicitConstructor(psiClass, className, classAt);
+
+            var fieldWildcard = pendingATs.remove(new Target.WildcardFieldTarget(className));
+            if (fieldWildcard != null) {
+                for (PsiField field : psiClass.getFields()) {
+                    // Apply a merged state if an explicit AT for the field already exists
+                    var newState = merge(fieldWildcard, pendingATs.remove(new Target.FieldTarget(className, field.getName())));
+                    logger.debug("Applying field wildcard AT %s to %s in %s", newState, field.getName(), className);
+                    apply(newState, field, psiClass);
                 }
+            }
 
-                checkImplicitConstructor(psiClass, className, classAt);
-
-                var fieldWildcard = pendingATs.remove(new Target.WildcardFieldTarget(className));
-                if (fieldWildcard != null) {
-                    for (PsiField field : psiClass.getFields()) {
-                        // Apply a merged state if an explicit AT for the field already exists
-                        var newState = merge(fieldWildcard, pendingATs.remove(new Target.FieldTarget(className, field.getName())));
-                        logger.debug("Applying field wildcard AT %s to %s in %s", newState, field.getName(), className);
-                        apply(newState, field, psiClass);
-                    }
-                }
-
-                var methodWildcard = pendingATs.remove(new Target.WildcardMethodTarget(className));
-                if (methodWildcard != null) {
-                    for (PsiMethod method : psiClass.getMethods()) {
-                        // Apply a merged state if an explicit AT for the method already exists
-                        var newState = merge(methodWildcard, pendingATs.remove(method(className, method)));
-                        logger.debug("Applying method wildcard AT %s to %s in %s", newState, method.getName(), className);
-                        apply(newState, method, psiClass);
-                    }
+            var methodWildcard = pendingATs.remove(new Target.WildcardMethodTarget(className));
+            if (methodWildcard != null) {
+                for (PsiMethod method : psiClass.getMethods()) {
+                    // Apply a merged state if an explicit AT for the method already exists
+                    var newState = merge(methodWildcard, pendingATs.remove(method(className, method)));
+                    logger.debug("Applying method wildcard AT %s to %s in %s", newState, method.getName(), className);
+                    apply(newState, method, psiClass);
                 }
             }
         } else if (element instanceof PsiField field) {
             final var cls = field.getContainingClass();
             if (cls != null && cls.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(cls);
+                String className = getJVMClassName(cls);
                 apply(pendingATs.remove(new Target.FieldTarget(className, field.getName())), field, cls);
             }
         } else if (element instanceof PsiMethod method) {
             final var cls = method.getContainingClass();
-            if (cls != null && cls.getQualifiedName() != null) {
-                String className = ClassUtil.getJVMClassName(cls);
-                apply(pendingATs.remove(method(className, method)), method, cls);
+            if (cls != null) {
+                var className = getJVMClassName(cls);
+                if (!className.isEmpty()) {
+                    apply(pendingATs.remove(method(className, method)), method, cls);
+                }
             }
         }
 
         element.acceptChildren(this);
+    }
+
+    // This returns a JVM class name like ClassUtil#getJVMClassName, but accounts for anonymous classes
+    private String getJVMClassName(PsiClass aClass) {
+        // Quick-path
+        final String qName = ClassUtil.getJVMClassName(aClass);
+        if (qName != null) return qName;
+
+        var sb = new StringBuilder();
+        PsiHelper.getBinaryClassName(aClass, sb); // This returns a binary class name with '/'s; convert it to a JVM class name with '.'s
+        return sb.toString().replace('/', '.');
     }
 
     private void apply(@Nullable Transformation at, PsiModifierListOwner owner, PsiClass containingClass) {
@@ -132,7 +161,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
             @Override
             public String toString() {
                 if (owner instanceof PsiClass cls) {
-                    return ClassUtil.getJVMClassName(cls);
+                    return getJVMClassName(cls);
                 }
                 String memberName;
                 if (owner instanceof PsiMethod mtd && mtd.isConstructor()) {
@@ -140,7 +169,7 @@ class ApplyATsVisitor extends PsiRecursiveElementVisitor {
                 } else {
                     memberName = ((NavigationItem) owner).getName();
                 }
-                return memberName + " of " + ClassUtil.getJVMClassName(containingClass);
+                return memberName + " of " + getJVMClassName(containingClass);
             }
         };
         logger.debug("Applying AT %s to %s", at, targetInfo);
